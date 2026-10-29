@@ -24,6 +24,12 @@ step:
 
 You can run any one of them alone.
 
+Last tested on 2026-10-29. A clean agent with only these skills and no
+settings file took a fresh app from localhost to production in about 48
+minutes, with 8 pull requests. The owner answered 14 setup questions in one
+reply, picked the brand and landing directions from local mocks, and added
+six DNS records by hand. A signed-in request then worked on production.
+
 ### The stack
 
 The skills assume this stack and do not try to cover others:
