@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""Find every setting in a repo that carries the app hostname.
+
+Usage: hostname-hooks [repo-dir]
+
+Scans source files for environment variables whose names suggest a URL or
+origin, plus well-known auth and payment providers, and prints a manifest of
+hooks: what to update, where it is read, and whether the update is
+programmable or a dashboard step. Read-only.
+"""
+from __future__ import annotations
+
+import os
+import re
+import sys
+from collections import defaultdict
+
+# Hidden directories are skipped too (agent worktrees, .git, .vercel).
+SKIP_DIRS = {"node_modules", "dist", "build", "_generated"}
+EXTS = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".toml", ".json", ".env.example"}
+
+# Variable-name patterns that hold a hostname, with how they are updated.
+ENV_RULES: list[tuple[re.Pattern[str], str, str]] = [
+    (re.compile(r"^(APP|SITE|PUBLIC|BASE|WEB|FRONTEND)_URL$|^(VITE|NEXT)_PUBLIC_(APP|SITE|BASE)_URL$"), "app url", "env: set to https://<hostname>"),
+    (re.compile(r"_REDIRECT_URI$|_REDIRECT_URL$|_CALLBACK_URL$"), "oauth redirect", "dashboard allowlist first, then env"),
+    (re.compile(r"_WEBHOOK_URL$"), "webhook", "usually backend URL; confirm, leave alone if so"),
+    (re.compile(r"ALLOWED_ORIGINS?$|_ORIGIN$|CORS_ORIGINS?$"), "origin allowlist", "env: add https://<hostname>"),
+]
+
+# Providers whose dashboards carry an origin or redirect even without an env var.
+PROVIDER_RULES: list[tuple[re.Pattern[str], str, str]] = [
+    (re.compile(r"@clerk/"), "Clerk", "dev: none; production domain and records: production-provisioning"),
+    (re.compile(r"@workos-inc/"), "WorkOS", "redirect URI in dashboard + WORKOS_REDIRECT_URI"),
+    (re.compile(r"""from ["']stripe["']|@stripe/"""), "Stripe", "checkout success/cancel URLs are usually built from the app url env"),
+    (re.compile(r"""from ["']resend["']|@sendgrid/"""), "Email sending", "per email_provider/email_domains setting: sending domain + DKIM, SPF, MX records; none: skip"),
+]
+
+ENV_READ = re.compile(r"process\.env\.([A-Z][A-Z0-9_]+)|os\.environ(?:\.get)?\(?\[?[\"']([A-Z][A-Z0-9_]+)[\"']|import\.meta\.env\.([A-Z][A-Z0-9_]+)")
+
+
+def scan(root: str) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    env_hits: dict[str, set[str]] = defaultdict(set)
+    provider_hits: dict[str, set[str]] = defaultdict(set)
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
+        for name in filenames:
+            if not any(name.endswith(ext) for ext in EXTS):
+                continue
+            path = os.path.join(dirpath, name)
+            try:
+                text = open(path, encoding="utf-8", errors="ignore").read()
+            except OSError:
+                continue
+            rel = os.path.relpath(path, root)
+            for match in ENV_READ.finditer(text):
+                var = next(g for g in match.groups() if g)
+                env_hits[var].add(rel)
+            for pattern, label, _ in PROVIDER_RULES:
+                if pattern.search(text):
+                    provider_hits[label].add(rel)
+    return env_hits, provider_hits
+
+
+def manifest(env_hits: dict[str, set[str]], provider_hits: dict[str, set[str]]) -> list[tuple[str, str, str, str]]:
+    rows: list[tuple[str, str, str, str]] = []
+    for var in sorted(env_hits):
+        for pattern, kind, action in ENV_RULES:
+            if pattern.search(var):
+                rows.append((var, kind, action, ", ".join(sorted(env_hits[var])[:3])))
+                break
+    for pattern, label, action in PROVIDER_RULES:
+        if label in provider_hits:
+            rows.append((label, "provider", action, ", ".join(sorted(provider_hits[label])[:3])))
+    return rows
+
+
+def main() -> int:
+    root = sys.argv[1] if len(sys.argv) > 1 else "."
+    rows = manifest(*scan(root))
+    if not rows:
+        print("No hostname-dependent settings found.")
+        return 0
+    width = max(len(r[0]) for r in rows)
+    print(f"{'SETTING'.ljust(width)}  KIND             ACTION")
+    for setting, kind, action, where in rows:
+        print(f"{setting.ljust(width)}  {kind.ljust(15)}  {action}")
+        print(f"{''.ljust(width)}  {'':15}  read in: {where}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

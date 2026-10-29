@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+"""Audit a page for search, answer-engine and generative-engine readiness.
+
+Usage: seo-audit <url-or-html-file> [--origin https://host]
+
+Fetches the page (or reads a file) and checks: lang, title, description,
+canonical, viewport, one h1, Open Graph and Twitter tags, and JSON-LD that
+parses and names a type. For URLs it also checks the files at the origin:
+robots.txt (sitemap line, AI crawlers), sitemap.xml, llms.txt,
+llms-full.txt, ai.txt and claim-receipts.json. Prints PASS/FAIL lines and
+exits 1 on any FAIL.
+Read-only; no network beyond the origin given.
+"""
+from __future__ import annotations
+
+import json
+import re
+import sys
+import urllib.error
+import urllib.request
+from html.parser import HTMLParser
+
+
+class Head(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.lang: str | None = None
+        self.title = ""
+        self.meta: dict[str, str] = {}
+        self.links: dict[str, str] = {}
+        self.ld: list[str] = []
+        self.h1 = 0
+        self._in_title = False
+        self._in_ld = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        a = {k.lower(): (v or "") for k, v in attrs}
+        if tag == "html":
+            self.lang = a.get("lang")
+        elif tag == "title":
+            self._in_title = True
+        elif tag == "meta":
+            key = a.get("name") or a.get("property")
+            if key:
+                self.meta[key.lower()] = a.get("content", "")
+        elif tag == "link" and a.get("rel"):
+            self.links[a["rel"].lower()] = a.get("href", "")
+        elif tag == "script" and a.get("type", "").lower() == "application/ld+json":
+            self._in_ld = True
+            self.ld.append("")
+        elif tag == "h1":
+            self.h1 += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "title":
+            self._in_title = False
+        if tag == "script":
+            self._in_ld = False
+
+    def handle_data(self, data: str) -> None:
+        if self._in_title:
+            self.title += data
+        if self._in_ld:
+            self.ld[-1] += data
+
+
+def fetch(url: str) -> tuple[int, str]:
+    req = urllib.request.Request(url, headers={"User-Agent": "seo-audit/1"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return r.status, r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return e.code, ""
+    except (urllib.error.URLError, TimeoutError):
+        return 0, ""
+
+
+def audit_html(html: str) -> list[tuple[bool, str]]:
+    h = Head()
+    h.feed(html)
+    title = h.title.strip()
+    desc = h.meta.get("description", "")
+    checks: list[tuple[bool, str]] = [
+        (bool(h.lang), f"html lang attribute ({h.lang or 'missing'})"),
+        (0 < len(title) <= 60, f"title 1-60 chars ({len(title)}: {title[:50]!r})"),
+        (50 <= len(desc) <= 160, f"meta description 50-160 chars ({len(desc)})"),
+        ("canonical" in h.links, "canonical link"),
+        ("viewport" in h.meta, "viewport meta"),
+        (h.h1 == 1, f"exactly one h1 ({h.h1})"),
+    ]
+    for key in ("og:title", "og:description", "og:image", "og:url", "og:type"):
+        checks.append((bool(h.meta.get(key)), f"{key}"))
+    for key in ("twitter:card", "twitter:title", "twitter:description", "twitter:image", "twitter:url"):
+        checks.append((bool(h.meta.get(key)), f"{key}"))
+    if not h.ld:
+        checks.append((False, "JSON-LD block present"))
+    all_types: set[str] = set()
+    for i, block in enumerate(h.ld):
+        try:
+            data = json.loads(block)
+            nodes = data.get("@graph", [data]) if isinstance(data, dict) else data
+            types = sorted({n.get("@type", "?") for n in nodes if isinstance(n, dict)})
+            all_types.update(types)
+            checks.append((bool(types) and "?" not in types, f"JSON-LD #{i + 1} parses, types: {', '.join(types)}"))
+        except json.JSONDecodeError as e:
+            checks.append((False, f"JSON-LD #{i + 1} invalid JSON: {e.msg}"))
+    # Informational: FAQPage is the structure answer engines quote most.
+    if h.ld:
+        checks.append((True, "FAQPage present" if "FAQPage" in all_types else "note: no FAQPage (add one on the landing page if there are questions to answer)"))
+    return checks
+
+
+def canonical_matches(html: str, page_url: str) -> tuple[bool, str]:
+    """The canonical must point at the host being served, or previews leak into search."""
+    h = Head()
+    h.feed(html)
+    canonical = h.links.get("canonical", "")
+    want = re.match(r"https?://[^/]+", page_url)
+    have = re.match(r"https?://[^/]+", canonical)
+    ok = bool(want and have and want.group(0) == have.group(0))
+    return ok, f"canonical host matches page host ({have.group(0) if have else 'none'} vs {want.group(0) if want else '?'})"
+
+
+def audit_origin(origin: str) -> list[tuple[bool, str]]:
+    out: list[tuple[bool, str]] = []
+    status, robots = fetch(f"{origin}/robots.txt")
+    out.append((status == 200 and "user-agent" in robots.lower(), "robots.txt served with a User-agent line"))
+    out.append(("sitemap:" in robots.lower(), "robots.txt names the sitemap"))
+    status, sitemap = fetch(f"{origin}/sitemap.xml")
+    out.append((status == 200 and "<urlset" in sitemap, "sitemap.xml served as a urlset"))
+    status, llms = fetch(f"{origin}/llms.txt")
+    out.append((status == 200 and llms.lstrip().startswith("# "), "llms.txt served, starts with an H1"))
+    # The GEO pack: the long form, the router, and grounded claims.
+    status, full = fetch(f"{origin}/llms-full.txt")
+    out.append((status == 200 and full.count("\n## ") >= 3, "llms-full.txt served with at least three sections"))
+    status, ai = fetch(f"{origin}/ai.txt")
+    out.append((status == 200 and "llms.txt" in ai and "sitemap" in ai.lower(), "ai.txt served, points at llms.txt and the sitemap"))
+    status, receipts = fetch(f"{origin}/claim-receipts.json")
+    try:
+        doc = json.loads(receipts) if status == 200 else {}
+        claims = doc.get("claims", [])
+        grounded = bool(claims) and all(c.get("evidence") and all(e.get("publicUrl") and e.get("quote") for e in c["evidence"]) for c in claims)
+        out.append((grounded, f"claim-receipts.json served, {len(claims)} claims each with publicUrl and quote evidence"))
+    except json.JSONDecodeError:
+        out.append((False, "claim-receipts.json is not valid JSON"))
+    status, robots = fetch(f"{origin}/robots.txt")
+    out.append((any(bot in robots for bot in ("GPTBot", "ClaudeBot", "PerplexityBot")), "robots.txt names AI crawlers (GPTBot, ClaudeBot, PerplexityBot)"))
+    return out
+
+
+def main() -> int:
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    if not args:
+        print(__doc__)
+        return 2
+    target = args[0]
+    origin = None
+    if "--origin" in sys.argv:
+        origin = sys.argv[sys.argv.index("--origin") + 1].rstrip("/")
+    if re.match(r"https?://", target):
+        status, html = fetch(target)
+        if status != 200:
+            print(f"FAIL fetch {target}: HTTP {status}")
+            return 1
+        origin = origin or re.match(r"https?://[^/]+", target).group(0)
+    else:
+        html = open(target, encoding="utf-8").read()
+    checks = audit_html(html)
+    # A dev server's canonical points at production on purpose; only judge real hosts.
+    if re.match(r"https?://", target) and not re.match(r"https?://(localhost|127\.0\.0\.1)", target):
+        checks.append(canonical_matches(html, target))
+    if origin:
+        checks += audit_origin(origin)
+    failed = 0
+    for ok, label in checks:
+        print(("PASS " if ok else "FAIL ") + label)
+        failed += not ok
+    print(f"\n{len(checks) - failed}/{len(checks)} passed")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
