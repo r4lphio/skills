@@ -72,6 +72,8 @@ every number as a sample.
   Vercel has no API to turn on Web Analytics. Ask the owner to turn it on in
   the Vercel dashboard, and list it as a follow-up until then. Until then
   the script's request returns 404 and the page still works.
+  If the owner decides to keep it off, remove the analytics component and
+  its line in the privacy page.
 - Leave the rest of the head to `brand-creation` (OG, description) and
   `seo-aeo-geo` (per-route heads, structured data, FAQ).
 
