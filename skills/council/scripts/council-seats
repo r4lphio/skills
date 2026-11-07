@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+"""Print the council's seats as JSON, with each seat's remaining plan usage.
+
+Usage: council-seats [--no-usage]
+
+Seats come from members.json beside this script, overlaid by the user's file at
+${XDG_CONFIG_HOME:-~/.config}/council/members.json (same shape; seats merge by id,
+so {"seats": [{"id": "grok", "enabled": false}]} turns one seat off).
+
+remaining_percent is the plan usage left in the tightest window, or null when the
+provider has no machine-readable usage. It never prints a credential.
+"""
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+SKILL_DIR = Path(__file__).resolve().parent.parent
+USER_FILE = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "council" / "members.json"
+CODEX_STALE_SECONDS = 3600
+
+
+def load_config():
+    config = json.loads((SKILL_DIR / "members.json").read_text())
+    if USER_FILE.exists():
+        override = json.loads(USER_FILE.read_text())
+        seats = {seat["id"]: seat for seat in config["seats"]}
+        for seat in override.pop("seats", []):
+            seats[seat["id"]] = {**seats.get(seat["id"], {}), **seat}
+        config.update(override)
+        config["seats"] = list(seats.values())
+    return config
+
+
+def claude_remaining(seat):
+    """One tiny `claude -p` call on the seat's model; its stream reports each plan window that applies."""
+    if not shutil.which("claude"):
+        return None, "claude is not on PATH"
+    try:
+        out = subprocess.run(
+            ["claude", "-p", "--model", seat.get("model") or "haiku", "--output-format", "stream-json", "--verbose", "Reply OK"],
+            capture_output=True, text=True, timeout=180, stdin=subprocess.DEVNULL, cwd=tempfile.gettempdir(),
+        ).stdout
+    except subprocess.TimeoutExpired:
+        return None, "claude usage probe timed out"
+    used = []
+    for line in out.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if event.get("type") != "rate_limit_event":
+            continue
+        info = event.get("rate_limit_info", {})
+        windows = info.get("unifiedWindows") or {}
+        used += [w["utilization"] for w in windows.values() if isinstance(w.get("utilization"), (int, float))]
+        if isinstance(info.get("utilization"), (int, float)):
+            used.append(info["utilization"])
+    if not used:
+        return None, "claude reported no rate-limit event"
+    return max(0, round(100 * (1 - max(used)))), "claude rate_limit_event, tightest window"
+
+
+def find_rate_limits(node):
+    """The general Codex plan bucket. Logs also hold snapshots of model-specific buckets."""
+    if isinstance(node, dict):
+        limits = node.get("rate_limits")
+        if isinstance(limits, dict) and limits.get("limit_id", "codex") == "codex":
+            return limits
+        for value in node.values():
+            found = find_rate_limits(value)
+            if found:
+                return found
+    return None
+
+
+def codex_latest():
+    sessions = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "sessions"
+    files = sorted(sessions.glob("**/rollout-*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for path in files[:5]:
+        for line in reversed(path.read_text(errors="replace").splitlines()):
+            if '"rate_limits"' not in line:
+                continue
+            try:
+                limits = find_rate_limits(json.loads(line))
+            except ValueError:
+                continue
+            if limits:
+                return limits, path.stat().st_mtime
+    return None, None
+
+
+def codex_remaining(seat):
+    """Codex writes its plan usage into each session log. Refresh with one tiny call when stale."""
+    limits, mtime = codex_latest()
+    if (limits is None or time.time() - mtime > CODEX_STALE_SECONDS) and shutil.which("codex"):
+        model = ["-m", seat["model"]] if seat.get("model") else []
+        try:
+            subprocess.run(
+                ["codex", "exec", "--skip-git-repo-check", "-s", "read-only", *model, "Reply OK"],
+                capture_output=True, text=True, timeout=240, stdin=subprocess.DEVNULL, cwd=tempfile.gettempdir(),
+            )
+        except subprocess.TimeoutExpired:
+            pass
+        limits, mtime = codex_latest()
+    if limits is None:
+        return None, "no codex session log with rate limits"
+    if time.time() - mtime > CODEX_STALE_SECONDS:
+        return None, "codex usage is more than an hour old and the refresh did not update it"
+    used = [w["used_percent"] for w in (limits.get("primary"), limits.get("secondary"))
+            if isinstance(w, dict) and isinstance(w.get("used_percent"), (int, float))]
+    if not used:
+        return None, "codex rate limits had no used_percent"
+    age = round((time.time() - mtime) / 60)
+    return max(0, round(100 - max(used))), f"codex session log, {age} min old"
+
+
+PROBES = {"claude": claude_remaining, "codex": codex_remaining}
+
+
+def main():
+    check_usage = "--no-usage" not in sys.argv[1:]
+    config = load_config()
+    for seat in config["seats"]:
+        seat.setdefault("enabled", True)
+        command = (seat.get("cli") or "").split()
+        seat["cli_on_path"] = bool(command) and shutil.which(command[0]) is not None
+        probe = PROBES.get(seat.get("usage"))
+        if not (check_usage and seat["enabled"] and probe):
+            seat["remaining_percent"] = None
+            seat["usage_source"] = "not checked" if probe else "no machine-readable usage"
+            continue
+        seat["remaining_percent"], seat["usage_source"] = probe(seat)
+    json.dump(config, sys.stdout, indent=2)
+    print()
+
+
+if __name__ == "__main__":
+    main()
