@@ -42,12 +42,26 @@ The skills assume this stack and do not try to cover others:
 The DNS steps work with deSEC, Vercel DNS, or any DNS host where you add the
 records by hand.
 
+## Review
+
+| Skill | What it does |
+| --- | --- |
+| `council` | Runs a review that has to converge. One read-only seat per model family scores each part of a mock, plan, spec or site against a shared decision record. The seats vote when their proposed changes conflict, and the work passes only when every seat gives every part the pass score (8 by default). Each round reviews one frozen build and ends with a scoreboard. |
+
+Seats come from `skills/council/members.json`. Override them in
+`~/.config/council/members.json` to turn a family off or to add one when it
+ships. A seat with less than 25% of its plan usage left, or with no way to read
+its usage, joins only after you say yes. The council checks usage again before
+each round, and stops at `max_rounds` (4) unless you give it a higher cap. A seat
+that runs out during a review leaves, and the council goes on without it.
+
 ## Prerequisites
 
 - Node 24 or later, which runs the TypeScript scripts directly, and pnpm
 - The Vercel CLI (`vercel`), logged in
 - python3 for the audit and hostname scripts, with Pillow for `to-webp`
 - `curl`, `jq`, and `dig`
+- For `council`: at least two of the `claude`, `codex`, `grok` and `cursor-agent` CLIs signed in, or T3 Code with those providers
 
 The skills run the Clerk CLI as `pnpm dlx clerk@4` and the Convex CLI as
 `npx convex` from the project, so you do not install them.
