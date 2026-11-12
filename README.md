@@ -46,13 +46,14 @@ records by hand.
 
 | Skill | What it does |
 | --- | --- |
-| `council` | Runs a review that has to converge. One read-only seat per model family scores each part of a mock, plan or spec against a shared decision record. The seats vote on each other's proposed changes, and the work passes only when every seat gives every part the pass score (8 by default). |
+| `council` | Runs a review that has to converge. One read-only seat per model family scores each part of a mock, plan, spec or site against a shared decision record. The seats vote when their proposed changes conflict, and the work passes only when every seat gives every part the pass score (8 by default). Each round reviews one frozen build and ends with a scoreboard. |
 
 Seats come from `skills/council/members.json`. Override them in
 `~/.config/council/members.json` to turn a family off or to add one when it
 ships. A seat with less than 25% of its plan usage left, or with no way to read
-its usage, joins only after you say yes. A seat that runs out during a review
-leaves, and the council goes on without it.
+its usage, joins only after you say yes. The council checks usage again before
+each round, and stops at `max_rounds` (4) unless you give it a higher cap. A seat
+that runs out during a review leaves, and the council goes on without it.
 
 ## Prerequisites
 

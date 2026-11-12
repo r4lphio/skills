@@ -12,9 +12,17 @@ anything.
 Read first: <decision record path>. Its decisions are settled. Do not mark a part
 down for following them. To change one, write a proposal with the reason.
 
-Artifact: <path or URL, and how to open it>
+Round notes: <round notes path>. They name the build to review, the evidence, your
+scores from the last round, and what changed. Check first that the faults you named
+last round are fixed.
+
+Artifact: <the frozen build named in the round notes, and how to open it>
 Sources it must follow: <spec, picks, earlier reviews>
 Parts to score: <part 1>, <part 2>, ...
+
+Use the artifact the way a person would, not only through screenshots: real clicks
+and keys, real sizes such as small phones held both ways, and motion on and off.
+A test that passes is not proof that a person can use it.
 
 For each part, give a score from 1 to 10 and the reasons. A part passes at
 <pass score>. For each fault, propose one change: the part, what to change, and why.
