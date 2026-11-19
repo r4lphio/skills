@@ -9,6 +9,11 @@ so {"seats": [{"id": "grok", "enabled": false}]} turns one seat off).
 
 remaining_percent is the plan usage left in the tightest window, or null when the
 provider has no machine-readable usage. It never prints a credential.
+
+A seat with a null model takes the newest model its provider reports. Codex lists
+its models in its own cache, so the gpt seat gets that model and `-m <model>` on
+its cli. The claude seat names the `opus` alias in its cli, which Claude Code
+resolves to the newest Opus.
 """
 
 import json
@@ -37,13 +42,43 @@ def load_config():
     return config
 
 
+def cli_model(seat):
+    """The model or alias named after --model or -m in the seat's cli, or None."""
+    words = (seat.get("cli") or "").split()
+    for flag in ("--model", "-m"):
+        if flag in words[:-1]:
+            return words[words.index(flag) + 1]
+    return None
+
+
+def codex_newest_model():
+    """The first model Codex lists in its own cache, or None when the cache gives none."""
+    cache = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "models_cache.json"
+    try:
+        models = json.loads(cache.read_text()).get("models", [])
+    except (OSError, ValueError):
+        return None
+    listed = [m for m in models if m.get("visibility") == "list" and m.get("slug")]
+    return min(listed, key=lambda m: m.get("priority", 0))["slug"] if listed else None
+
+
+def resolve_model(seat):
+    """Fill in a null model for a codex seat, and name it on the cli."""
+    if seat.get("model") or seat.get("usage") != "codex" or not seat.get("cli"):
+        return
+    newest = codex_newest_model()
+    if newest and not cli_model(seat):
+        seat["model"] = newest
+        seat["cli"] = f"{seat['cli']} -m {newest}"
+
+
 def claude_remaining(seat):
     """One tiny `claude -p` call on the seat's model; its stream reports each plan window that applies."""
     if not shutil.which("claude"):
         return None, "claude is not on PATH"
     try:
         out = subprocess.run(
-            ["claude", "-p", "--model", seat.get("model") or "haiku", "--output-format", "stream-json", "--verbose", "Reply OK"],
+            ["claude", "-p", "--model", seat.get("model") or cli_model(seat) or "haiku", "--output-format", "stream-json", "--verbose", "Reply OK"],
             capture_output=True, text=True, timeout=180, stdin=subprocess.DEVNULL, cwd=tempfile.gettempdir(),
         ).stdout
     except subprocess.TimeoutExpired:
@@ -128,6 +163,7 @@ def main():
     config = load_config()
     for seat in config["seats"]:
         seat.setdefault("enabled", True)
+        resolve_model(seat)
         command = (seat.get("cli") or "").split()
         seat["cli_on_path"] = bool(command) and shutil.which(command[0]) is not None
         probe = PROBES.get(seat.get("usage"))

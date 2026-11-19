@@ -30,9 +30,11 @@ Open a todo list with one entry per step before you start.
 
 1. Run `scripts/council-seats`. It prints every seat with `enabled`, `cli_on_path` and
    `remaining_percent`, plus `pass_score`, `low_usage_percent`, `max_rounds` and
-   `min_seats`. The user's file `~/.config/council/members.json` overrides the
-   defaults; seats merge by `id`, so a user turns a seat off with `"enabled": false`
-   or adds a new family with a new `id`.
+   `min_seats`. The seat list pins no Claude or GPT version: the script fills in
+   the newest GPT model, and the claude seat's `cli` names the `opus` alias. The
+   user's file `~/.config/council/members.json` overrides the defaults; seats
+   merge by `id`, so a user turns a seat off with `"enabled": false` or adds a
+   new family with a new `id`.
 2. Drop each seat with `enabled: false`.
 3. Check that each remaining seat can run:
    - In T3 Code: call `orchestrator_capabilities`. The seat runs when its
